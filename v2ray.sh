@@ -447,20 +447,36 @@ function create_user() {
     local traffic_tag="user-${new_uuid}" # Tag completo para rastreo de tráfico
     local random_path="/" # Por defecto
     
-    # Pedir el puerto de la lista de puertos activos
-    local current_ports=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    # ⭐️ INICIO DE LA CORRECCIÓN DE PUERTOS
+    local current_ports_raw=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
     local available_ports=()
-    if echo "$current_ports" | grep -v -q '\['; then
-        available_ports+=("$current_ports")
-    else
-        available_ports=($(${JQ_PATH} -r '.inbounds[0].port[]' "${CONFIG_FILE}" 2>/dev/null))
-    fi
 
+    if echo "$current_ports_raw" | grep -q '\['; then
+        # Es un array: extrae los números, quita comillas y newlines, y convierte a array Bash
+        local ports_string=$(echo "$current_ports_raw" | ${JQ_PATH} -r 'if type == "array" then .[] | tostring else . | tostring end' 2>/dev/null | tr '\n' ' ')
+        read -r -a available_ports <<< "$ports_string"
+    else
+        # Es un puerto simple:
+        available_ports+=("$current_ports_raw")
+    fi
+    # Limpiar cualquier espacio en blanco o valores nulos
+    available_ports=($(echo "${available_ports[@]}" | tr ' ' '\n' | grep -vE '^\s*$' | sort -u))
+
+    # Verificar que haya puertos válidos después de la limpieza
+    if [ ${#available_ports[@]} -eq 0 ]; then
+        echo -e "${ROJO}[ERROR]${NORMAL} No se encontraron puertos activos válidos. Use la opción 7 para configurarlos."
+        pause
+        return
+    fi
+    
     echo -e "\n${AZUL}Puertos disponibles:${NORMAL} ${available_ports[*]}"
     read -p "Seleccione el puerto que el usuario usará: " USER_PORT
     
+    # ⭐️ FIN DE LA CORRECCIÓN DE PUERTOS
+    
+    # La comprobación ahora funciona porque 'available_ports' es un array de Bash limpio
     if [[ ! " ${available_ports[*]} " =~ " ${USER_PORT} " ]]; then
-        echo -e "${ROJO}[ERROR]${NORMAL} Puerto ${USER_PORT} no está activo. Use la opción 7 para activarlo."
+        echo -e "${ROJO}[ERROR]${NORMAL} Puerto ${USER_PORT} no está activo o es inválido. Por favor, seleccione uno de la lista."
         pause
         return
     fi
