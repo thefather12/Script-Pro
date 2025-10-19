@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # =======================================================
-# SCRIPT DE GESTIÓN AVANZADA DE XRAY/V2RAY (VMess + WS + TLS)
-# REQUISITOS: Xray instalado y 'jq' (manipulador de JSON)
+# SCRIPT UNIFICADO DE GESTIÓN XRAY/V2RAY
+# Incluye la instalación de dependencias y Xray Core.
 # =======================================================
 
 INSTALL_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${INSTALL_DIR}/config.json"
 JQ_PATH=$(which jq)
 
-# --- Funciones de Estilo ---
+# --- Variables de Estilo ---
 VERDE='\033[0;32m'
 ROJO='\033[0;31m'
 AZUL='\033[0;34m'
@@ -19,57 +19,137 @@ NORMAL='\033[0m'
 function banner() {
     clear
     echo -e "${AZUL}===================================================${NORMAL}"
-    echo -e "${VERDE}         🚀 XRAY/V2RAY GESTIÓN RÁPIDA 🚀          ${NORMAL}"
+    echo -e "${VERDE}         🚀 XRAY/V2RAY GESTIÓN UNIFICADA 🚀        ${NORMAL}"
     echo -e "${AZUL}===================================================${NORMAL}"
 }
 
-# --- Funciones Core de Xray ---
+# --- Funciones de Utilidad ---
 
-# 1. Función para verificar el requisito 'jq'
-function check_jq() {
-    if ! command -v jq &> /dev/null; then
-        echo -e "${ROJO}[ERROR]${NORMAL} 'jq' no está instalado. Es necesario para manipular el JSON."
-        echo "Instálalo con 'sudo apt install jq' o 'sudo yum install jq'."
+# Determina el gestor de paquetes y verifica/instala dependencias
+function install_dependencies() {
+    banner
+    echo -e "${AMARILLO}--- 1. INSTALANDO DEPENDENCIAS (jq, curl, etc.) ---${NORMAL}"
+    
+    if command -v apt &> /dev/null; then
+        echo "Usando APT (Debian/Ubuntu)..."
+        apt update -y
+        apt install -y wget curl unzip jq bc
+    elif command -v yum &> /dev/null; then
+        echo "Usando YUM (CentOS/RHEL)..."
+        yum install -y wget curl unzip jq bc
+    elif command -v dnf &> /dev/null; then
+        echo "Usando DNF (Fedora/RHEL moderno)..."
+        dnf install -y wget curl unzip jq bc
+    else
+        echo -e "${ROJO}[ERROR]${NORMAL} Gestor de paquetes no soportado. Instala manualmente: wget, curl, unzip, jq, bc."
         exit 1
     fi
+    
+    # Reestablece la ruta de jq después de la instalación
+    JQ_PATH=$(which jq) 
+    if [ ! -f "$JQ_PATH" ]; then
+        echo -e "${ROJO}[ERROR]${NORMAL} La herramienta 'jq' no se pudo instalar."
+        exit 1
+    fi
+    echo -e "${VERDE}[ÉXITO]${NORMAL} Dependencias instaladas correctamente."
 }
 
-# 2. Función para crear un nuevo usuario VMess
+# Instala Xray Core
+function install_xray_core() {
+    banner
+    echo -e "${AMARILLO}--- 2. INSTALANDO XRAY CORE ---${NORMAL}"
+    
+    # Script oficial de XTLS/Xray para una instalación limpia
+    bash -c "$(curl -L https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${VERDE}[ÉXITO]${NORMAL} Xray Core instalado en /usr/local/bin/xray."
+        echo -e "${AZUL}[INFO]${NORMAL} El archivo de configuración se encuentra en ${CONFIG_FILE}."
+        
+        # Crear un archivo de configuración básico si no existe (el instalador suele hacerlo, pero es una protección)
+        if [ ! -f "$CONFIG_FILE" ]; then
+            create_initial_config
+        fi
+        
+        systemctl enable xray
+        systemctl restart xray
+    else
+        echo -e "${ROJO}[ERROR]${NORMAL} Falló la instalación de Xray Core."
+        exit 1
+    fi
+    pause
+}
+
+# Crea una configuración JSON básica (si el instalador falla en crearla)
+function create_initial_config() {
+    local NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+    
+    echo "Creando configuración inicial VMess básica..."
+    mkdir -p "${INSTALL_DIR}"
+    
+    cat > "${CONFIG_FILE}" << EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "port": 10000, 
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "${NEW_UUID}",
+            "alterId": 0,
+            "email": "default_admin"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "settings": {} },
+    { "protocol": "blackhole", "tag": "block", "settings": {} }
+  ]
+}
+EOF
+echo -e "${VERDE}[ÉXITO]${NORMAL} Configuración inicial guardada. Usa la opción 4 para ver los detalles."
+}
+
+
+# --- Funciones de Administración (del script anterior) ---
+
 function create_user() {
+    # La lógica de esta función se mantiene (usa jq para añadir al JSON)
     banner
     echo -e "${AMARILLO}--- CREAR NUEVO USUARIO VMESS ---${NORMAL}"
     
-    # 1. Obtener detalles
     read -p "Ingrese el nombre/alias del usuario: " username
     
     # Generar UUID
-    new_uuid=$(cat /proc/sys/kernel/random/uuid)
+    local new_uuid=$(cat /proc/sys/kernel/random/uuid)
     
-    # 2. Agregar el nuevo cliente al archivo config.json usando jq
-    
-    # Nota: El índice [0] debe apuntar al inbound VMess principal en tu config.json
+    # Lógica de jq para agregar cliente al primer inbound (asumiendo que es el VMess)
     ${JQ_PATH} '.inbounds[0].settings.clients += [{"id": "'"${new_uuid}"'", "alterId": 0, "email": "'"${username}"'"}]' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
     if [ $? -eq 0 ]; then
         echo -e "${VERDE}[ÉXITO]${NORMAL} Usuario '${username}' agregado con éxito."
         systemctl restart xray
         echo -e "${AZUL}[INFO]${NORMAL} Servicio Xray reiniciado."
-        
-        # Opcional: Mostrar datos de conexión para facilitar el enlace
         show_connection_details "${username}" "${new_uuid}"
     else
-        echo -e "${ROJO}[ERROR]${NORMAL} No se pudo agregar el usuario. Revisa tu archivo ${CONFIG_FILE}."
+        echo -e "${ROJO}[ERROR]${NORMAL} No se pudo agregar el usuario. Revisa ${CONFIG_FILE}."
     fi
     pause
 }
 
-# 3. Función para eliminar usuario
 function delete_user() {
+    # La lógica de esta función se mantiene (usa jq para eliminar del JSON)
     banner
     echo -e "${AMARILLO}--- ELIMINAR USUARIO VMESS ---${NORMAL}"
     
-    # Mostrar clientes actuales para facilitar la selección
-    echo -e "${AZUL}Clientes Activos (UUID/Email):${NORMAL}"
+    echo -e "${AZUL}Clientes Activos (UUID | Email):${NORMAL}"
     ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null
     echo "-----------------------------------"
 
@@ -81,7 +161,7 @@ function delete_user() {
         return
     fi
     
-    # Eliminar el cliente del archivo config.json usando jq
+    # Lógica de jq para eliminar el cliente por UUID
     ${JQ_PATH} 'del(.inbounds[0].settings.clients[] | select(.id == "'"${uuid_to_delete}"'"))' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
     if [ $? -eq 0 ]; then
@@ -94,43 +174,39 @@ function delete_user() {
     pause
 }
 
-# 4. Función para la gestión de límite de tráfico (Simulación/Lógica)
 function manage_traffic_limit() {
+    # Función simbólica, ya que requiere API o paneles externos para ser funcional
     banner
     echo -e "${AMARILLO}--- GESTIÓN DE LÍMITE POR GB (AVANZADO) ---${NORMAL}"
-    echo -e "${ROJO}[ADVERTENCIA]${NORMAL} V2Ray/Xray no tiene un límite de tráfico nativo en JSON."
-    echo "Esta función solo ${AMARILLO}simula la configuración${NORMAL} para una implementación futura."
+    echo -e "${ROJO}[ADVERTENCIA]${NORMAL} Xray no tiene un límite de tráfico nativo en JSON."
+    echo "Esta función solo ${AMARILLO}simula la configuración${NORMAL}."
     
     read -p "Ingrese el UUID del usuario: " uuid_target
     read -p "Ingrese el límite de tráfico en GB (ej. 10): " limit_gb
     
-    echo -e "${AZUL}[INFO]${NORMAL} Para una gestión real de GB, necesitarías un script externo o un panel (como X-UI) que use la API de Xray para monitorear el tráfico y deshabilitar el usuario al alcanzar el límite."
+    echo -e "${AZUL}[INFO]${NORMAL} Para gestión real de GB, use un panel (X-UI) o un script de monitoreo con la API de Xray."
     echo -e "${VERDE}[CONFIGURADO]${NORMAL} Se ha registrado que el usuario ${uuid_target} tiene un límite de ${limit_gb} GB."
     pause
 }
 
-# 5. Función para mostrar la configuración completa del usuario
 function show_connection_details() {
     local username=$1
     local new_uuid=$2
     
-    # 1. Extraer datos del config.json (Asumiendo que es VMess con WS/TLS)
-    local port=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}")
-    local path=$(${JQ_PATH} '.inbounds[0].streamSettings.wsSettings.path' "${CONFIG_FILE}")
+    # Extraer datos de la configuración actual
+    local port=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    local network=$(${JQ_PATH} '.inbounds[0].streamSettings.network' "${CONFIG_FILE}" 2>/dev/null)
+    local security=$(${JQ_PATH} '.inbounds[0].streamSettings.security' "${CONFIG_FILE}" 2>/dev/null)
     
     echo -e "\n${AZUL}--- DETALLES DE CONEXIÓN PARA '${username}' ---${NORMAL}"
     echo -e "Protocolo: ${VERDE}VMess${NORMAL}"
     echo -e "UUID: ${VERDE}${new_uuid}${NORMAL}"
-    echo -e "Puerto: ${VERDE}${port}${NORMAL}"
-    echo -e "Transporte: ${VERDE}WebSocket + TLS${NORMAL}"
-    echo -e "Path (Ruta): ${VERDE}${path}${NORMAL}"
-    echo -e "Dominio (Host): ${VERDE}[TU DOMINIO AQUÍ]${NORMAL}"
-    
-    echo -e "\n${AMARILLO}¡ADVERTENCIA! DEBES REEMPLAZAR '[TU DOMINIO AQUÍ]' CON EL DOMINIO REAL DE TU SERVIDOR.${NORMAL}"
-    # No se genera el link vmess:// completo aquí ya que requiere el dominio/IP real.
+    echo -e "Puerto: ${VERDE}${port:-N/A}${NORMAL}"
+    echo -e "Transporte: ${VERDE}${network:-N/A}${NORMAL}"
+    echo -e "Seguridad: ${VERDE}${security:-N/A}${NORMAL}"
+    echo -e "\n${AMARILLO}Recuerda usar estos datos en tu cliente V2Ray/Xray.${NORMAL}"
 }
 
-# 6. Función de pausa
 function pause() {
     echo ""
     read -p "Presiona [Enter] para continuar..."
@@ -139,7 +215,20 @@ function pause() {
 # --- Menú Principal ---
 
 function main_menu() {
-    check_jq
+    # Verificar si Xray y jq están instalados antes de mostrar el menú de gestión
+    if ! command -v xray &> /dev/null || ! command -v jq &> /dev/null; then
+        banner
+        echo -e "${ROJO}[ALERTA]${NORMAL} Xray o dependencias no instaladas."
+        echo -e "${AZUL}1)${NORMAL} INSTALAR Xray y Dependencias"
+        echo -e "${AZUL}0)${NORMAL} Salir"
+        read -p "Opción: " initial_choice
+        case $initial_choice in
+            1) install_dependencies; install_xray_core ;;
+            0) echo -e "${AZUL}¡Adiós!${NORMAL}"; exit 0 ;;
+            *) echo -e "${ROJO}Opción no válida. Intenta de nuevo.${NORMAL}"; pause; main_menu ;;
+        esac
+    fi
+    
     while true; do
         banner
         echo -e "Selecciona una opción de gestión:"
