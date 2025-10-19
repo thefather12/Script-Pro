@@ -338,7 +338,7 @@ function change_domain() {
     pause
 }
 
-# ⭐️ FUNCIÓN CORREGIDA: Gestión de Múltiples Puertos
+# --- FUNCIÓN: Gestión de Múltiples Puertos (Corregida) ---
 function manage_multi_ports() {
     banner
     echo -e "${AMARILLO}--- 7. ADMINISTRAR PUERTOS VMESS ---${NORMAL}"
@@ -400,7 +400,7 @@ function manage_multi_ports() {
         return
     fi
     
-    # ⭐️ CORRECCIÓN APLICADA: Construir el JSON de puertos de forma robusta
+    # Construir el JSON de puertos de forma robusta
     local PORT_JSON=""
     if [ ${#port_array[@]} -eq 1 ]; then
         PORT_JSON="${port_array[0]}" # Si solo queda 1, se guarda como número
@@ -417,7 +417,6 @@ function manage_multi_ports() {
     fi
     
     # Usar jq para actualizar solo la clave 'port' con la nueva variable PORT_JSON
-    # Usamos --argjson para que jq interprete PORT_JSON como un número o array
     ${JQ_PATH} --argjson new_port "$PORT_JSON" '.inbounds[0].port = $new_port' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
     if [ $? -eq 0 ]; then
@@ -438,6 +437,7 @@ function generate_random_path() {
     cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1
 }
 
+# ⭐️ FUNCIÓN: create_user (CORREGIDA para el listado de puertos)
 function create_user() {
     banner
     echo -e "${AMARILLO}--- 1. CREAR NUEVO USUARIO VMESS ---${NORMAL}"
@@ -447,23 +447,22 @@ function create_user() {
     local traffic_tag="user-${new_uuid}" # Tag completo para rastreo de tráfico
     local random_path="/" # Por defecto
     
-    # ⭐️ INICIO DE LA CORRECCIÓN DE PUERTOS
+    # ⭐️ INICIO DE LA CORRECCIÓN: Obtener y limpiar la lista de puertos activos
     local current_ports_raw=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
     local available_ports=()
 
     if echo "$current_ports_raw" | grep -q '\['; then
-        # Es un array: extrae los números, quita comillas y newlines, y convierte a array Bash
-        local ports_string=$(echo "$current_ports_raw" | ${JQ_PATH} -r 'if type == "array" then .[] | tostring else . | tostring end' 2>/dev/null | tr '\n' ' ')
+        # Es un array: extrae los números y convierte a array Bash (limpiando comillas/newlines)
+        local ports_string=$(echo "$current_ports_raw" | ${JQ_PATH} -r '.[] | tostring' 2>/dev/null | tr '\n' ' ')
         read -r -a available_ports <<< "$ports_string"
     else
         # Es un puerto simple:
         available_ports+=("$current_ports_raw")
     fi
-    # Limpiar cualquier espacio en blanco o valores nulos
+    # Limpiar y ordenar la lista para la validación
     available_ports=($(echo "${available_ports[@]}" | tr ' ' '\n' | grep -vE '^\s*$' | sort -u))
 
-    # Verificar que haya puertos válidos después de la limpieza
-    if [ ${#available_ports[@]} -eq 0 ]; then
+    if [ ${#available_ports[@]} -eq 0 ] || [ "${available_ports[0]}" == "null" ]; then
         echo -e "${ROJO}[ERROR]${NORMAL} No se encontraron puertos activos válidos. Use la opción 7 para configurarlos."
         pause
         return
@@ -472,7 +471,7 @@ function create_user() {
     echo -e "\n${AZUL}Puertos disponibles:${NORMAL} ${available_ports[*]}"
     read -p "Seleccione el puerto que el usuario usará: " USER_PORT
     
-    # ⭐️ FIN DE LA CORRECCIÓN DE PUERTOS
+    # ⭐️ FIN DE LA CORRECCIÓN
     
     # La comprobación ahora funciona porque 'available_ports' es un array de Bash limpio
     if [[ ! " ${available_ports[*]} " =~ " ${USER_PORT} " ]]; then
@@ -537,7 +536,7 @@ EOF
     echo -e "${BLANCO}Host: ${SERVER_DOMAIN} | Puerto: ${user_port}${NORMAL}"
     echo -e "Transporte: ${TRANSPORT_NETWORK} | Seguridad: ${SECURITY_TYPE} | Path: ${user_path}"
     
-    # 3. La reparación: Imprimir la URL completa con el prefijo vmess://
+    # 3. Imprimir la URL completa con el prefijo vmess://
     echo -e "\n${VERDE}vmess://${vmess_link}${NORMAL}\n"
     
     echo -e "Pégalo en tu aplicación cliente compatible."
