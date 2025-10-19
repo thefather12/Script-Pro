@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # =======================================================
-# SCRIPT UNIFICADO DE GESTIÓN XRAY/V2RAY (FINAL)
-# Incluye selección de protocolos, instalación y generación de enlaces.
+# SCRIPT UNIFICADO DE GESTIÓN XRAY/V2RAY (VERSIÓN AVANZADA)
 # =======================================================
 
 INSTALL_DIR="/usr/local/etc/xray"
@@ -14,7 +13,6 @@ SERVER_PORT=""
 SERVER_DOMAIN=""
 TRANSPORT_NETWORK="tcp" # Default: tcp
 SECURITY_TYPE="none"    # Default: none
-SECRET_PATH="/vmess_path_secreto" 
 
 # --- Variables de Estilo ---
 VERDE='\033[0;32m'
@@ -88,54 +86,41 @@ function install_xray_core() {
     pause
 }
 
-# --- Configuración Inicial de Red y Archivo ---
+# Carga la configuración actual del JSON a las variables globales
+function load_global_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Usa jq para cargar variables de configuración global
+        SERVER_PORT=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+        TRANSPORT_NETWORK=$(${JQ_PATH} '.inbounds[0].streamSettings.network' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
+        SECURITY_TYPE=$(${JQ_PATH} '.inbounds[0].streamSettings.security' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
+        SERVER_DOMAIN=$(${JQ_PATH} '.inbounds[0].streamSettings.tlsSettings.serverName' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
+        
+        # Si SERVER_DOMAIN es nulo (ej. si no usa TLS), intenta obtener la IP pública
+        if [ -z "$SERVER_DOMAIN" ] || [ "$SERVER_DOMAIN" == "null" ]; then
+            SERVER_DOMAIN=$(curl -s icanhazip.com || hostname -I | awk '{print $1}')
+        fi
+        
+        # Si SERVER_PORT es nulo (configuración base vacía), usa un valor por defecto
+        if [ -z "$SERVER_PORT" ] || [ "$SERVER_PORT" == "null" ]; then
+             SERVER_PORT="443"
+        fi
 
-function setup_initial_config() {
-    banner
-    echo -e "${AMARILLO}--- 3. CONFIGURACIÓN INICIAL DE LA RED Y PROTOCOLOS ---${NORMAL}"
-
-    # 1. Pedir Puerto y Dominio
-    read -p "¿En qué puerto desea que se conecten los usuarios (ej. 443): " SERVER_PORT
-    read -p "¿Cuál es el Dominio (Host) del servidor (ej. tu-vps.com): " SERVER_DOMAIN
-    if [[ -z "$SERVER_PORT" || -z "$SERVER_DOMAIN" ]]; then
-        echo -e "${ROJO}[ERROR]${NORMAL} Puerto y/o Dominio inválidos. Saliendo."
-        exit 1
     fi
+}
 
-    # 2. Selección de Transporte
-    echo -e "\n${BLANCO}--- SELECCIÓN DE TRANSPORTE ---${NORMAL}"
-    echo "1) ${VERDE}WebSocket (ws)${NORMAL} - Recomendado para ofuscación web (simula tráfico HTTP)."
-    echo "2) ${AZUL}TCP${NORMAL} - Simple y rápido, pero fácil de detectar."
-    read -p "Selecciona el tipo de transporte (1 o 2, default: 1): " TRANSPORT_CHOICE
-    TRANSPORT_NETWORK="ws"
-    if [ "$TRANSPORT_CHOICE" == "2" ]; then
-        TRANSPORT_NETWORK="tcp"
-    fi
+# --- Funciones de Configuración de Red ---
+
+function update_config_file() {
+    # Esta función actualiza el config.json con las variables globales
+    local INBOUND_SETTINGS=$(${JQ_PATH} '.inbounds[0].settings' "${CONFIG_FILE}" 2>/dev/null)
     
-    # 3. Selección de Seguridad (TLS)
-    echo -e "\n${BLANCO}--- SELECCIÓN DE SEGURIDAD ---${NORMAL}"
-    echo "1) ${VERDE}TLS${NORMAL} - Recomendado para cifrado y ofuscación (requiere dominio y certificado)."
-    echo "2) ${ROJO}Ninguno (none)${NORMAL} - Sin cifrado (¡NO RECOMENDADO!)."
-    read -p "Selecciona el tipo de seguridad (1 o 2, default: 1): " SECURITY_CHOICE
-    SECURITY_TYPE="tls"
-    if [ "$SECURITY_CHOICE" == "2" ]; then
-        SECURITY_TYPE="none"
-    fi
-
-    # 4. Configuración de TLS (si se seleccionó)
-    CERT_CONFIG=""
+    # Manejo de TLS
+    local TLS_CONFIG=""
     if [ "$SECURITY_TYPE" == "tls" ]; then
-        echo -e "\n${AMARILLO}--- CONFIGURACIÓN DE CERTIFICADOS TLS ---${NORMAL}"
         read -p "¿Ruta al archivo .cer (ej. /etc/ssl/fullchain.cer): " CERT_FILE
         read -p "¿Ruta al archivo .key (ej. /etc/ssl/private.key): " KEY_FILE
         
-        if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
-            echo -e "${ROJO}[ADVERTENCIA]${NORMAL} ¡Archivos de certificado/llave no encontrados! Esto fallará a menos que los coloques."
-            CERT_FILE="/dev/null" 
-            KEY_FILE="/dev/null"
-        fi
-        
-        CERT_CONFIG=$(cat << EOF_CERT
+        TLS_CONFIG=$(cat << EOF_CERT
         "security": "tls",
         "tlsSettings": {
           "alpn": ["http/1.1"],
@@ -150,35 +135,56 @@ function setup_initial_config() {
 EOF_CERT
 )
     fi
-    
-    # 5. Generación de Configuración JSON
-    local NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
-    
-    mkdir -p "${INSTALL_DIR}"
-    
-    # Contenido JSON: La clave está en la variable $CERT_CONFIG para incluir/excluir TLS
-    cat > "${CONFIG_FILE}" << EOF
+
+    # Manejo de Transportes (ws, grpc, http, etc.)
+    local STREAM_SETTINGS=""
+    if [ "$TRANSPORT_NETWORK" == "ws" ]; then
+        STREAM_SETTINGS=$(cat << EOF_WS
+        "network": "ws",
+        ${TLS_CONFIG}
+        "wsSettings": { "path": "/vmess-path" }
+EOF_WS
+)
+    elif [ "$TRANSPORT_NETWORK" == "grpc" ]; then
+        STREAM_SETTINGS=$(cat << EOF_GRPC
+        "network": "grpc",
+        ${TLS_CONFIG}
+        "grpcSettings": { "serviceName": "v2ray-grpc" }
+EOF_GRPC
+)
+    elif [ "$TRANSPORT_NETWORK" == "h2" ]; then
+        STREAM_SETTINGS=$(cat << EOF_H2
+        "network": "h2",
+        ${TLS_CONFIG}
+        "httpSettings": { "host": ["${SERVER_DOMAIN}"] }
+EOF_H2
+)
+    elif [ "$TRANSPORT_NETWORK" == "kcp" ]; then
+        STREAM_SETTINGS=$(cat << EOF_KCP
+        "network": "kcp",
+        "kcpSettings": { "header": { "type": "wechat-video" } }
+EOF_KCP
+)
+    else # default: tcp
+        STREAM_SETTINGS=$(cat << EOF_TCP
+        "network": "tcp",
+        ${TLS_CONFIG}
+        "tcpSettings": { "header": { "type": "none" } }
+EOF_TCP
+)
+    fi
+
+    # Reconstruir el archivo JSON con los nuevos streamSettings
+    local NEW_CONFIG=$(cat << EOF_CONFIG
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
       "port": ${SERVER_PORT},
       "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "${NEW_UUID}",
-            "alterId": 0,
-            "email": "default_admin"
-          }
-        ]
-      },
+      "settings": ${INBOUND_SETTINGS},
       "streamSettings": {
-        "network": "${TRANSPORT_NETWORK}",
-        ${CERT_CONFIG}
-        "wsSettings": {
-          "path": "${SECRET_PATH}"
-        }
+        ${STREAM_SETTINGS}
       }
     }
   ],
@@ -187,32 +193,103 @@ EOF_CERT
     { "protocol": "blackhole", "tag": "block", "settings": {} }
   ]
 }
-EOF
-    echo -e "${VERDE}[ÉXITO]${NORMAL} Configuración inicial guardada."
-    systemctl enable xray
-    systemctl restart xray
-    pause
-    # Recargar variables globales después de la configuración
-    load_global_config
+EOF_CONFIG
+)
+
+    echo "$NEW_CONFIG" > "$CONFIG_FILE"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${VERDE}[ÉXITO]${NORMAL} Archivo ${CONFIG_FILE} actualizado."
+        systemctl restart xray
+        echo -e "${AZUL}[INFO]${NORMAL} Servicio Xray reiniciado."
+    else
+        echo -e "${ROJO}[ERROR]${NORMAL} Falló la actualización del archivo. Revísalo manualmente."
+    fi
 }
 
-# Carga la configuración actual del JSON a las variables globales
-function load_global_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        SERVER_PORT=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
-        SERVER_DOMAIN=$(${JQ_PATH} '.inbounds[0].streamSettings.tlsSettings.serverName' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
-        TRANSPORT_NETWORK=$(${JQ_PATH} '.inbounds[0].streamSettings.network' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
-        SECURITY_TYPE=$(${JQ_PATH} '.inbounds[0].streamSettings.security' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
-        SECRET_PATH=$(${JQ_PATH} '.inbounds[0].streamSettings.wsSettings.path' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
-        # Si no hay serverName (no-TLS), intenta obtener el IP
-        if [ "$SECURITY_TYPE" == "none" ] || [ -z "$SERVER_DOMAIN" ]; then
-            SERVER_DOMAIN=$(curl -s icanhazip.com || hostname -I | awk '{print $1}')
-        fi
+function change_port() {
+    banner
+    echo -e "${AMARILLO}--- CAMBIAR PUERTO ---${NORMAL}"
+    echo -e "Puerto actual: ${BLANCO}${SERVER_PORT}${NORMAL}"
+    read -p "Ingrese el nuevo puerto: " NEW_PORT
+    
+    if [[ ! "$NEW_PORT" =~ ^[0-9]+$ || "$NEW_PORT" -lt 1 || "$NEW_PORT" -gt 65535 ]]; then
+        echo -e "${ROJO}[ERROR]${NORMAL} Puerto inválido."
+        pause
+        return
     fi
+    
+    SERVER_PORT="$NEW_PORT"
+    update_config_file
+    pause
+}
+
+function change_protocol() {
+    banner
+    echo -e "${AMARILLO}--- CAMBIAR PROTOCOLO DE TRANSPORTE ---${NORMAL}"
+    echo -e "Protocolo actual: ${BLANCO}${TRANSPORT_NETWORK} (${SECURITY_TYPE})${NORMAL}"
+    echo "1) ${VERDE}WebSocket (ws)${NORMAL} - Ofuscación web, ideal con TLS."
+    echo "2) ${AZUL}TCP (raw)${NORMAL} - Simple, rápido."
+    echo "3) ${CIAN}mKCP (kcp)${NORMAL} - Protocolo UDP para entornos inestables."
+    echo "4) ${VERDE}gRPC${NORMAL} - Alternativa moderna a WebSocket, ideal con TLS."
+    echo "5) ${AZUL}HTTP/2 (h2) (XHTTP)${NORMAL} - Alternativa a WS, requiere TLS."
+    
+    read -p "Selecciona el transporte (1-5): " CHOICE
+    
+    case $CHOICE in
+        1) TRANSPORT_NETWORK="ws" ;;
+        2) TRANSPORT_NETWORK="tcp" ;;
+        3) TRANSPORT_NETWORK="kcp"; SECURITY_TYPE="none" ;; # KCP no usa TLS directamente
+        4) TRANSPORT_NETWORK="grpc" ;;
+        5) TRANSPORT_NETWORK="h2" ;;
+        *) echo -e "${ROJO}Opción inválida.${NORMAL}"; pause; return ;;
+    esac
+
+    # Para WS, gRPC, h2 forzar a preguntar por TLS
+    if [ "$TRANSPORT_NETWORK" == "ws" ] || [ "$TRANSPORT_NETWORK" == "grpc" ] || [ "$TRANSPORT_NETWORK" == "h2" ]; then
+        echo -e "\n${BLANCO}--- CONFIGURAR SEGURIDAD ---${NORMAL}"
+        echo "1) ${VERDE}TLS${NORMAL} - Recomendado."
+        echo "2) ${ROJO}Ninguno (none)${NORMAL}."
+        read -p "Selecciona la seguridad (1 o 2, default: 1): " SEC_CHOICE
+        SECURITY_TYPE="tls"
+        if [ "$SEC_CHOICE" == "2" ]; then
+            SECURITY_TYPE="none"
+        fi
+    else
+        SECURITY_TYPE="none"
+    fi
+    
+    update_config_file
+    pause
+}
+
+function change_domain() {
+    banner
+    echo -e "${AMARILLO}--- AGREGAR/CAMBIAR DOMINIO (HOST) ---${NORMAL}"
+    echo -e "Dominio actual: ${BLANCO}${SERVER_DOMAIN}${NORMAL}"
+    read -p "Ingrese el nuevo Dominio (Host): " NEW_DOMAIN
+    
+    if [[ -z "$NEW_DOMAIN" ]]; then
+        echo -e "${ROJO}[ERROR]${NORMAL} Dominio no puede estar vacío."
+        pause
+        return
+    fi
+    
+    SERVER_DOMAIN="$NEW_DOMAIN"
+    echo -e "${VERDE}[INFO]${NORMAL} Dominio actualizado. Reinicia el servicio para aplicar los cambios de TLS/h2."
+    
+    # Esto solo actualiza la variable, la configuración JSON se actualiza al cambiar el protocolo o al crear un usuario.
+    # Opcional: Llamar a update_config_file aquí si el protocolo actual es TLS/h2/gRPC
+    pause
 }
 
 
 # --- Funciones de Administración ---
+
+function generate_random_path() {
+    # Genera una cadena aleatoria de 10 caracteres alfanuméricos
+    cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1
+}
 
 function create_user() {
     banner
@@ -220,7 +297,14 @@ function create_user() {
     
     read -p "Ingrese el nombre/alias del usuario: " username
     local new_uuid=$(cat /proc/sys/kernel/random/uuid)
+    local random_path="/" # Por defecto
     
+    # Generar Path aleatorio solo si el protocolo lo requiere
+    if [ "$TRANSPORT_NETWORK" == "ws" ] || [ "$TRANSPORT_NETWORK" == "grpc" ] || [ "$TRANSPORT_NETWORK" == "h2" ]; then
+        random_path="/$(generate_random_path)"
+        echo -e "${AZUL}[INFO]${NORMAL} Path generado para este usuario: ${random_path}"
+    fi
+
     # Lógica de jq para agregar cliente al primer inbound
     ${JQ_PATH} '.inbounds[0].settings.clients += [{"id": "'"${new_uuid}"'", "alterId": 0, "email": "'"${username}"'"}]' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
@@ -228,7 +312,7 @@ function create_user() {
         echo -e "${VERDE}[ÉXITO]${NORMAL} Usuario '${username}' agregado con éxito."
         systemctl restart xray
         echo -e "${AZUL}[INFO]${NORMAL} Servicio Xray reiniciado."
-        generate_vmess_link "${username}" "${new_uuid}"
+        generate_vmess_link "${username}" "${new_uuid}" "${random_path}"
     else
         echo -e "${ROJO}[ERROR]${NORMAL} No se pudo agregar el usuario. Revisa ${CONFIG_FILE}."
     fi
@@ -240,6 +324,7 @@ function create_user() {
 function generate_vmess_link() {
     local username=$1
     local new_uuid=$2
+    local user_path=$3
     
     # Parámetros para el cliente VMess (JSON sin codificar)
     local client_config=$(cat << EOF
@@ -253,7 +338,7 @@ function generate_vmess_link() {
   "net": "${TRANSPORT_NETWORK}",
   "type": "none",
   "host": "${SERVER_DOMAIN}",
-  "path": "${SECRET_PATH}",
+  "path": "${user_path}",
   "tls": "${SECURITY_TYPE}",
   "scy": "auto",
   "allowInsecure": false
@@ -265,15 +350,15 @@ EOF
     local vmess_link=$(echo "${client_config}" | base64 -w 0)
     
     echo -e "\n${CIAN}--- ENLACE VMESS GENERADO ---${NORMAL}"
-    echo -e "${BLANCO}Dominio: ${SERVER_DOMAIN} | Puerto: ${SERVER_PORT}${NORMAL}"
-    echo -e "Transporte: ${TRANSPORT_NETWORK} | Seguridad: ${SECURITY_TYPE}"
+    echo -e "${BLANCO}Host: ${SERVER_DOMAIN} | Puerto: ${SERVER_PORT}${NORMAL}"
+    echo -e "Transporte: ${TRANSPORT_NETWORK} | Seguridad: ${SECURITY_TYPE} | Path: ${user_path}"
     echo -e "\n${VERDE}vmess://${vmess_link}${NORMAL}\n"
-    echo -e "Pégalo en V2RayNG/V2RayN o la aplicación cliente compatible."
+    echo -e "Pégalo en tu aplicación cliente compatible."
 }
 
-
+# --- Funciones de Gestión (se mantienen) ---
 function delete_user() {
-    # Se mantiene la lógica de eliminación por UUID
+    # Lógica para eliminar usuario por UUID
     banner
     echo -e "${AMARILLO}--- ELIMINAR USUARIO VMESS ---${NORMAL}"
     
@@ -301,10 +386,10 @@ function delete_user() {
 }
 
 function manage_traffic_limit() {
-    # Función simbólica, ya que requiere API o paneles externos para ser funcional
+    # Función simbólica
     banner
     echo -e "${AMARILLO}--- GESTIÓN DE LÍMITE POR GB (AVANZADO) ---${NORMAL}"
-    echo -e "${ROJO}[ADVERTENCIA]${NORMAL} Xray no tiene un límite de tráfico nativo en JSON. Esta función es simbólica.${NORMAL}"
+    echo -e "${ROJO}[ADVERTENCIA]${NORMAL} Xray no tiene un límite de tráfico nativo en JSON. Se necesita un panel (X-UI) o la API para esta función.${NORMAL}"
     pause
 }
 
@@ -323,7 +408,7 @@ function main_menu() {
         banner
         echo -e "${ROJO}[ALERTA]${NORMAL} El sistema Xray no está completamente configurado."
         echo -e "${AZUL}1)${NORMAL} INSTALAR TODO (Dependencias y Xray Core)"
-        echo -e "${AZUL}2)${NORMAL} CONFIGURAR RED Y PROTOCOLOS (Puerto, Dominio, Certificados)"
+        echo -e "${AZUL}2)${NORMAL} CONFIGURAR RED, PUERTO Y PROTOCOLOS"
         echo -e "${AZUL}0)${NORMAL} Salir"
         read -p "Opción: " initial_choice
         case $initial_choice in
@@ -337,14 +422,17 @@ function main_menu() {
     # 2. MENÚ DE GESTIÓN DE USUARIOS
     while true; do
         banner
-        echo -e "${BLANCO}CONFIGURACIÓN ACTUAL: ${SERVER_DOMAIN}:${SERVER_PORT} [${TRANSPORT_NETWORK}/${SECURITY_TYPE}]${NORMAL}"
+        echo -e "${BLANCO}HOST: ${SERVER_DOMAIN} | PUERTO: ${SERVER_PORT} | PROTOCOLO: ${TRANSPORT_NETWORK} (${SECURITY_TYPE})${NORMAL}"
         echo -e "---------------------------------------------------"
-        echo -e "${AZUL}1)${NORMAL} Crear ${VERDE}NUEVO USUARIO${NORMAL} (Genera VMess Link)"
+        echo -e "${AZUL}1)${NORMAL} Crear ${VERDE}NUEVO USUARIO${NORMAL} (Genera UUID/Path/Link)"
         echo -e "${AZUL}2)${NORMAL} Eliminar ${ROJO}USUARIO existente${NORMAL} (Por UUID)"
-        echo -e "${AZUL}3)${NORMAL} Gestión de Límite de ${AMARILLO}GB (Simulación)${NORMAL}"
-        echo -e "${AZUL}4)${NORMAL} Mostrar Usuarios ${AMARILLO}Activos${NORMAL}"
-        echo -e "${AZUL}5)${NORMAL} Reiniciar el servicio Xray"
         echo -e "---------------------------------------------------"
+        echo -e "${AZUL}3)${NORMAL} Cambiar PUERTO (${SERVER_PORT})"
+        echo -e "${AZUL}4)${NORMAL} Cambiar PROTOCOLO (${TRANSPORT_NETWORK})"
+        echo -e "${AZUL}5)${NORMAL} Agregar/Cambiar DOMINIO (${SERVER_DOMAIN})"
+        echo -e "---------------------------------------------------"
+        echo -e "${AZUL}6)${NORMAL} Mostrar Usuarios ${AMARILLO}Activos${NORMAL}"
+        echo -e "${AZUL}7)${NORMAL} Reiniciar el servicio Xray"
         echo -e "${AZUL}0)${NORMAL} Salir del script"
         echo -e "---------------------------------------------------"
         
@@ -353,9 +441,11 @@ function main_menu() {
         case $choice in
             1) create_user ;;
             2) delete_user ;;
-            3) manage_traffic_limit ;;
-            4) banner; echo -e "${AMARILLO}--- USUARIOS ACTIVOS (UUID | Email) ---${NORMAL}"; ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null; pause ;;
-            5) systemctl restart xray; echo -e "${VERDE}Servicio Xray reiniciado con éxito.${NORMAL}"; pause ;;
+            3) change_port ;;
+            4) change_protocol ;;
+            5) change_domain ;;
+            6) banner; echo -e "${AMARILLO}--- USUARIOS ACTIVOS (UUID | Email) ---${NORMAL}"; ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null; pause ;;
+            7) systemctl restart xray; echo -e "${VERDE}Servicio Xray reiniciado con éxito.${NORMAL}"; pause ;;
             0) echo -e "${AZUL}¡Adiós!${NORMAL}"; exit 0 ;;
             *) echo -e "${ROJO}Opción no válida. Intenta de nuevo.${NORMAL}"; pause ;;
         esac
