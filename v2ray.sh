@@ -2,7 +2,7 @@
 
 # =======================================================
 # SCRIPT UNIFICADO DE GESTIÓN XRAY/V2RAY (VERSIÓN DEFINITIVA)
-# Incluye Monitoreo de Consumo de GB (vía API).
+# Incluye Multi-Puerto, Monitoreo de GB y Emojis en el Menú.
 # =======================================================
 
 INSTALL_DIR="/usr/local/etc/xray"
@@ -11,7 +11,7 @@ JQ_PATH=$(which jq)
 XRAY_API_SERVER="127.0.0.1:10085"
 
 # --- Variables de Configuración Global (Se cargan desde load_global_config) ---
-SERVER_PORT=""
+SERVER_PORT="" # Usado solo para mostrar el puerto principal o un rango
 SERVER_DOMAIN=""
 TRANSPORT_NETWORK="tcp"
 SECURITY_TYPE="none"
@@ -59,7 +59,6 @@ function install_dependencies() {
     if [ "$PKG_MANAGER" != "none" ]; then
         echo "Usando $PKG_MANAGER..."
         sudo $PKG_MANAGER update -y
-        # 'bc' es necesario para los cálculos de GB
         sudo $PKG_MANAGER install -y wget curl unzip jq bc
     else
         echo -e "${ROJO}[ERROR]${NORMAL} Gestor de paquetes no soportado."
@@ -93,7 +92,17 @@ function install_xray_core() {
 function load_global_config() {
     if [ -f "$CONFIG_FILE" ]; then
         # Carga variables esenciales
-        SERVER_PORT=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+        local PORTS=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+        
+        # Determinar SERVER_PORT para mostrar en el banner (maneja número o array)
+        if echo "$PORTS" | grep -q '\['; then
+            # Es un array de puertos
+            SERVER_PORT=$(${JQ_PATH} '.inbounds[0].port | join(", ")' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
+        else
+            # Es un puerto simple (número)
+            SERVER_PORT=$PORTS
+        fi
+
         TRANSPORT_NETWORK=$(${JQ_PATH} '.inbounds[0].streamSettings.network' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
         SECURITY_TYPE=$(${JQ_PATH} '.inbounds[0].streamSettings.security' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
         SERVER_DOMAIN=$(${JQ_PATH} '.inbounds[0].streamSettings.tlsSettings.serverName' "${CONFIG_FILE}" 2>/dev/null | tr -d '"')
@@ -114,6 +123,7 @@ function load_global_config() {
 function update_config_file() {
     # Esta función actualiza el config.json con las variables globales y asegura la API y HandlerStat
     local INBOUND_SETTINGS=$(${JQ_PATH} '.inbounds[0].settings' "${CONFIG_FILE}" 2>/dev/null)
+    local CURRENT_PORT=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null) # Preservar puertos existentes
     
     # Manejo de TLS (genera solo si es "tls")
     local TLS_CONFIG=""
@@ -139,8 +149,6 @@ EOF_CERT
 
     # Manejo de StreamSettings
     local STREAM_SETTINGS=""
-    local PATH_CONFIG='"wsSettings": { "path": "/vmess-path" }'
-    
     if [ "$TRANSPORT_NETWORK" == "ws" ]; then
         STREAM_SETTINGS=$(cat << EOF_WS
         "network": "ws",
@@ -188,7 +196,7 @@ EOF_TCP
   },
   "inbounds": [
     {
-      "port": ${SERVER_PORT},
+      "port": ${CURRENT_PORT},
       "protocol": "vmess",
       "settings": ${INBOUND_SETTINGS},
       "streamSettings": {
@@ -235,27 +243,13 @@ EOF_CONFIG
 }
 
 function change_port() {
-    # (Mismo código de cambio de puerto)
-    banner
-    echo -e "${AMARILLO}--- CAMBIAR PUERTO ---${NORMAL}"
-    echo -e "Puerto actual: ${BLANCO}${SERVER_PORT}${NORMAL}"
-    read -p "Ingrese el nuevo puerto: " NEW_PORT
-    
-    if [[ ! "$NEW_PORT" =~ ^[0-9]+$ || "$NEW_PORT" -lt 1 || "$NEW_PORT" -gt 65535 ]]; then
-        echo -e "${ROJO}[ERROR]${NORMAL} Puerto inválido."
-        pause
-        return
-    fi
-    
-    SERVER_PORT="$NEW_PORT"
-    update_config_file
-    pause
+    # Función original de cambio de puerto (redirige a la nueva función de gestión de puertos)
+    manage_multi_ports
 }
 
 function change_protocol() {
-    # (Mismo código de cambio de protocolo de red)
     banner
-    echo -e "${AMARILLO}--- CAMBIAR PROTOCOLO DE TRANSPORTE ---${NORMAL}"
+    echo -e "${AMARILLO}--- 8. CAMBIAR PROTOCOLO DE TRANSPORTE ---${NORMAL}"
     echo -e "Protocolo actual: ${BLANCO}${TRANSPORT_NETWORK} (${SECURITY_TYPE})${NORMAL}"
     echo "1) ${VERDE}WebSocket (ws)${NORMAL}"
     echo "2) ${AZUL}TCP (raw)${NORMAL}"
@@ -293,9 +287,8 @@ function change_protocol() {
 }
 
 function change_tls_status() {
-    # (Mismo código de activar/desactivar TLS)
     banner
-    echo -e "${AMARILLO}--- ACTIVAR/DESACTIVAR TLS ---${NORMAL}"
+    echo -e "${AMARILLO}--- 6. ACTIVAR/DESACTIVAR TLS ---${NORMAL}"
     echo -e "Estado actual: ${BLANCO}${SECURITY_TYPE}${NORMAL}"
     
     if [ "$TRANSPORT_NETWORK" == "kcp" ] || [ "$TRANSPORT_NETWORK" == "tcp" ]; then
@@ -323,9 +316,8 @@ function change_tls_status() {
 }
 
 function change_domain() {
-    # (Mismo código de cambio de dominio)
     banner
-    echo -e "${AMARILLO}--- AGREGAR/CAMBIAR DOMINIO (HOST) ---${NORMAL}"
+    echo -e "${AMARILLO}--- 9. AGREGAR/CAMBIAR DOMINIO (HOST) ---${NORMAL}"
     echo -e "Dominio actual: ${BLANCO}${SERVER_DOMAIN}${NORMAL}"
     read -p "Ingrese el nuevo Dominio (Host): " NEW_DOMAIN
     
@@ -345,6 +337,90 @@ function change_domain() {
     pause
 }
 
+# --- Gestión de Múltiples Puertos ---
+function manage_multi_ports() {
+    banner
+    echo -e "${AMARILLO}--- 7. ADMINISTRAR PUERTOS VMESS ---${NORMAL}"
+    
+    local current_ports=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    local port_array=()
+
+    # Si es un solo número, convertir a array temporalmente
+    if echo "$current_ports" | grep -v -q '\['; then
+        port_array+=("$current_ports")
+    else
+        # Si ya es un array, parsearlo
+        port_array=($(${JQ_PATH} -r '.inbounds[0].port[]' "${CONFIG_FILE}" 2>/dev/null))
+    fi
+
+    echo -e "Puertos actualmente activos: ${VERDE}${port_array[*]}${NORMAL}"
+    echo "-------------------------------------------------"
+    echo "1) ${VERDE}Agregar Nuevo Puerto${NORMAL}"
+    echo "2) ${ROJO}Eliminar Puerto Existente${NORMAL}"
+    read -p "Opción (1 o 2): " PORT_CHOICE
+    
+    if [ "$PORT_CHOICE" == "1" ]; then
+        read -p "Ingrese el puerto a AGREGAR: " NEW_PORT
+        if [[ ! "$NEW_PORT" =~ ^[0-9]+$ || "$NEW_PORT" -lt 1 || "$NEW_PORT" -gt 65535 ]]; then
+            echo -e "${ROJO}[ERROR]${NORMAL} Puerto inválido."
+            pause
+            return
+        fi
+        if [[ " ${port_array[*]} " =~ " ${NEW_PORT} " ]]; then
+            echo -e "${ROJO}[ERROR]${NORMAL} El puerto ${NEW_PORT} ya está activo."
+            pause
+            return
+        fi
+        
+        port_array+=("$NEW_PORT")
+        echo -e "${VERDE}[ÉXITO]${NORMAL} Puerto ${NEW_PORT} agregado."
+
+    elif [ "$PORT_CHOICE" == "2" ]; then
+        read -p "Ingrese el puerto a ELIMINAR: " DEL_PORT
+        if [[ ! " ${port_array[*]} " =~ " ${DEL_PORT} " ]]; then
+            echo -e "${ROJO}[ERROR]${NORMAL} El puerto ${DEL_PORT} no está en la lista."
+            pause
+            return
+        fi
+
+        # Eliminar el puerto del array
+        local new_array=()
+        for p in "${port_array[@]}"; do
+            if [ "$p" != "$DEL_PORT" ]; then
+                new_array+=("$p")
+            fi
+        done
+        port_array=("${new_array[@]}")
+        echo -e "${VERDE}[ÉXITO]${NORMAL} Puerto ${DEL_PORT} eliminado."
+        
+    else
+        echo -e "${ROJO}Opción inválida.${NORMAL}"
+        pause
+        return
+    fi
+    
+    # Aplicar los cambios al config.json
+    local PORT_JSON=""
+    if [ ${#port_array[@]} -eq 1 ]; then
+        PORT_JSON="${port_array[0]}" # Si solo queda 1, se guarda como número
+    else
+        # Convertir el array a formato JSON [p1, p2, p3]
+        PORT_JSON=$(${JQ_PATH} -n --argjson arr "$(printf '%s\n' "${port_array[@]}" | ${JQ_PATH} -R . | ${JQ_PATH} -slR .)" '[$arr | .[] | tonumber]')
+    fi
+    
+    # Usar jq para actualizar solo la clave 'port'
+    ${JQ_PATH} '.inbounds[0].port = '"$PORT_JSON" "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${VERDE}[ÉXITO]${NORMAL} Configuración de puertos actualizada."
+        systemctl restart xray
+        load_global_config # Recargar el banner
+    else
+        echo -e "${ROJO}[ERROR]${NORMAL} Falló al guardar la configuración de puertos."
+    fi
+    pause
+}
+
 # --- Funciones de Administración ---
 
 function generate_random_path() {
@@ -353,15 +429,32 @@ function generate_random_path() {
 }
 
 function create_user() {
-    # (Mismo código de creación de usuario con tag de tráfico)
     banner
-    echo -e "${AMARILLO}--- CREAR NUEVO USUARIO VMESS ---${NORMAL}"
+    echo -e "${AMARILLO}--- 1. CREAR NUEVO USUARIO VMESS ---${NORMAL}"
     
     read -p "Ingrese el nombre/alias del usuario: " username
     local new_uuid=$(cat /proc/sys/kernel/random/uuid)
     local traffic_tag="user-${new_uuid}" # Tag completo para rastreo de tráfico
     local random_path="/" # Por defecto
     
+    # 🛑 NUEVO: Pedir el puerto de la lista
+    local current_ports=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    local available_ports=()
+    if echo "$current_ports" | grep -v -q '\['; then
+        available_ports+=("$current_ports")
+    else
+        available_ports=($(${JQ_PATH} -r '.inbounds[0].port[]' "${CONFIG_FILE}" 2>/dev/null))
+    fi
+
+    echo -e "\n${AZUL}Puertos disponibles:${NORMAL} ${available_ports[*]}"
+    read -p "Seleccione el puerto que el usuario usará: " USER_PORT
+    
+    if [[ ! " ${available_ports[*]} " =~ " ${USER_PORT} " ]]; then
+        echo -e "${ROJO}[ERROR]${NORMAL} Puerto ${USER_PORT} no está activo. Use la opción 7 para activarlo."
+        pause
+        return
+    fi
+
     # Generar Path aleatorio solo si el protocolo lo requiere
     if [ "$TRANSPORT_NETWORK" == "ws" ] || [ "$TRANSPORT_NETWORK" == "grpc" ] || [ "$TRANSPORT_NETWORK" == "h2" ]; then
         random_path="/$(generate_random_path)"
@@ -375,18 +468,59 @@ function create_user() {
         echo -e "${VERDE}[ÉXITO]${NORMAL} Usuario '${username}' agregado con éxito."
         systemctl restart xray
         echo -e "${AZUL}[INFO]${NORMAL} Servicio Xray reiniciado."
-        generate_vmess_link "${username}" "${new_uuid}" "${random_path}"
+        # Pasar el puerto elegido al generador de enlace
+        generate_vmess_link "${username}" "${new_uuid}" "${random_path}" "${USER_PORT}"
     else
         echo -e "${ROJO}[ERROR]${NORMAL} No se pudo agregar el usuario. Revisa ${CONFIG_FILE}."
     fi
     pause
 }
 
+# --- Generación de Enlace VMess (Corregido) ---
+
+function generate_vmess_link() {
+    local username=$1
+    local new_uuid=$2
+    local user_path=$3
+    local user_port=$4 # Puerto elegido por el usuario
+    
+    # 1. Parámetros para el cliente VMess (JSON sin codificar)
+    local client_config=$(cat << EOF
+{
+  "v": "2",
+  "ps": "${username}",
+  "add": "${SERVER_DOMAIN}",
+  "port": "${user_port}",
+  "id": "${new_uuid}",
+  "aid": "0",
+  "net": "${TRANSPORT_NETWORK}",
+  "type": "none",
+  "host": "${SERVER_DOMAIN}",
+  "path": "${user_path}",
+  "tls": "${SECURITY_TYPE}",
+  "scy": "auto",
+  "allowInsecure": false
+}
+EOF
+)
+
+    # 2. Codificar el JSON en Base64 sin saltos de línea (-w 0)
+    local vmess_link=$(echo "${client_config}" | base64 -w 0)
+    
+    echo -e "\n${CIAN}--- ENLACE VMESS GENERADO ---${NORMAL}"
+    echo -e "${BLANCO}Host: ${SERVER_DOMAIN} | Puerto: ${user_port}${NORMAL}"
+    echo -e "Transporte: ${TRANSPORT_NETWORK} | Seguridad: ${SECURITY_TYPE} | Path: ${user_path}"
+    
+    # 3. ⭐️ LA REPARACIÓN: Imprimir la URL completa con el prefijo vmess://
+    echo -e "\n${VERDE}vmess://${vmess_link}${NORMAL}\n"
+    
+    echo -e "Pégalo en tu aplicación cliente compatible."
+}
+
 
 function delete_user() {
-    # (Mismo código de eliminación de usuario, incluyendo limpieza de estadísticas)
     banner
-    echo -e "${AMARILLO}--- ELIMINAR USUARIO VMESS ---${NORMAL}"
+    echo -e "${AMARILLO}--- 2. ELIMINAR USUARIO VMESS ---${NORMAL}"
     
     echo -e "${AZUL}Clientes Activos (UUID | Email):${NORMAL}"
     ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null
@@ -415,7 +549,7 @@ function delete_user() {
 
 function manage_traffic_limit() {
     banner
-    echo -e "${AMARILLO}--- GESTIÓN DE LÍMITE DE GB POR USUARIO (API) ---${NORMAL}"
+    echo -e "${AMARILLO}--- 3. GESTIÓN DE LÍMITE DE GB POR USUARIO (API) ---${NORMAL}"
     echo -e "${ROJO}[ADVERTENCIA]${NORMAL} La API solo CONSULTA/REINICIA el tráfico. El BLOQUEO DEBE hacerse con un script externo.${NORMAL}"
     
     echo -e "${AZUL}Clientes Activos (UUID | Email):${NORMAL}"
@@ -435,7 +569,9 @@ function manage_traffic_limit() {
 
     case $LIMIT_CHOICE in
         1)
-            show_user_traffic "${target_uuid}"
+            # Esta función no existe, pero redirigirá a la consulta manual
+            /usr/local/bin/xray api stats --server ${XRAY_API_SERVER} -r "user>>>${target_uuid}>>>traffic>>>uplink"
+            /usr/local/bin/xray api stats --server ${XRAY_API_SERVER} -r "user>>>${target_uuid}>>>traffic>>>downlink"
             ;;
         2)
             echo "Reiniciando el tráfico (Uplink/Downlink) para ${target_uuid}..."
@@ -451,12 +587,10 @@ function manage_traffic_limit() {
 }
 
 
-# --- NUEVA FUNCIÓN: Muestra todas las estadísticas en GB ---
 function show_traffic_stats() {
     banner
-    echo -e "${AMARILLO}--- 8. CONSUMO DE GB POR USUARIO ---${NORMAL}"
+    echo -e "${AMARILLO}--- 4. CONSUMO DE GB POR USUARIO ---${NORMAL}"
     
-    # 1. Verificar si el binario de Xray y la API están disponibles
     if ! command -v xray &> /dev/null; then
         echo -e "${ROJO}[ERROR]${NORMAL} Xray no encontrado. Reinstala Xray Core."
         pause
@@ -466,7 +600,6 @@ function show_traffic_stats() {
     echo -e "${CIAN}UID               | Consumo Total (GB) | UPLINK (GB) | DOWNLINK (GB) | Email${NORMAL}"
     echo "-------------------------------------------------------------------------------------"
     
-    # 2. Obtener la lista de UUIDs y Emails
     local users_data=$(${JQ_PATH} '.inbounds[0].settings.clients[] | {id: .id, email: .email}' "${CONFIG_FILE}" 2>/dev/null)
     
     if [ -z "$users_data" ]; then
@@ -477,29 +610,23 @@ function show_traffic_stats() {
 
     local API_CALL="/usr/local/bin/xray api stats --server ${XRAY_API_SERVER}"
     
-    # 3. Iterar sobre cada usuario para obtener las estadísticas
     echo "$users_data" | ${JQ_PATH} -c '. | select(has("id"))' | while read user; do
         local uuid=$(echo "$user" | ${JQ_PATH} -r '.id')
         local email=$(echo "$user" | ${JQ_PATH} -r '.email')
         
-        # Obtener bytes de Uplink y Downlink
         local up_bytes=$($API_CALL -r "user>>>${uuid}>>>traffic>>>uplink" 2>/dev/null | awk '{print $NF}' | grep -oE '[0-9]+')
         local down_bytes=$($API_CALL -r "user>>>${uuid}>>>traffic>>>downlink" 2>/dev/null | awk '{print $NF}' | grep -oE '[0-9]+')
 
-        # Si no hay bytes (usuario nuevo o sin tráfico), se establece a 0
         up_bytes=${up_bytes:-0}
         down_bytes=${down_bytes:-0}
         
-        # Constante para convertir Bytes a GB (1024^3)
         local GB_DIVISOR="1073741824"
         
-        # Calcular tráfico en GB (usando 'bc' para aritmética de punto flotante)
         local total_bytes=$(echo "$up_bytes + $down_bytes" | bc)
         local up_gb=$(echo "scale=3; $up_bytes / $GB_DIVISOR" | bc)
         local down_gb=$(echo "scale=3; $down_bytes / $GB_DIVISOR" | bc)
         local total_gb=$(echo "scale=3; $total_bytes / $GB_DIVISOR" | bc)
         
-        # Formatear y mostrar la línea
         printf "${AZUL}%-15s ${NORMAL}| ${AMARILLO}%-18s ${NORMAL}| %-11s | %-11s | %s\n" \
                "${uuid:0:15}..." \
                "${total_gb}" \
@@ -519,44 +646,43 @@ function show_traffic_stats() {
 function main_menu() {
     load_global_config
 
-    # 1. VERIFICACIÓN DE ESTADO INICIAL (igual)
+    # 1. VERIFICACIÓN DE ESTADO INICIAL
     local XRAY_INSTALLED=$(command -v xray &> /dev/null; echo $?)
     local JQ_INSTALLED=$(command -v jq &> /dev/null; echo $?)
     local CONFIG_EXISTS=$(test -f "$CONFIG_FILE"; echo $?)
     
     if [ "$XRAY_INSTALLED" != "0" ] || [ "$JQ_INSTALLED" != "0" ] || [ "$CONFIG_EXISTS" != "0" ]; then
-        # ... (código de instalación inicial)
         banner
         echo -e "${ROJO}[ALERTA]${NORMAL} El sistema Xray no está completamente configurado."
-        echo -e "${AZUL}1)${NORMAL} INSTALAR TODO (Dependencias y Xray Core)"
-        echo -e "${AZUL}2)${NORMAL} CONFIGURAR RED, PUERTO Y PROTOCOLOS"
-        echo -e "${AZUL}0)${NORMAL} Salir"
+        echo -e "${AZUL}1) ⚙️ INSTALAR TODO (Dependencias y Xray Core)"
+        echo -e "${AZUL}2) 🌐 CONFIGURAR RED, PUERTO Y PROTOCOLOS"
+        echo -e "${AZUL}0) 🚪 Salir"
         read -p "Opción: " initial_choice
         case $initial_choice in
             1) install_dependencies; install_xray_core; main_menu ;;
             2) install_dependencies; update_config_file; main_menu ;;
-            0) echo -e "${AZUL}¡Adiós!${NORMAL}"; exit 0 ;;
+            0) echo -e "${AZUL}¡Adiós! 👋${NORMAL}"; exit 0 ;;
             *) echo -e "${ROJO}Opción no válida.${NORMAL}"; pause; main_menu ;;
         esac
     fi
     
-    # 2. MENÚ DE GESTIÓN DE USUARIOS
+    # 2. MENÚ DE GESTIÓN DE USUARIOS CON EMOTICONOS
     while true; do
         banner
-        echo -e "${BLANCO}HOST: ${SERVER_DOMAIN} | PUERTO: ${SERVER_PORT} | PROTOCOLO: ${TRANSPORT_NETWORK} | SEGURIDAD: ${SECURITY_TYPE}${NORMAL}"
+        echo -e "${BLANCO}HOST: ${SERVER_DOMAIN} | PUERTO(S): ${SERVER_PORT} | PROTOCOLO: ${TRANSPORT_NETWORK} | SEGURIDAD: ${SECURITY_TYPE}${NORMAL}"
         echo -e "---------------------------------------------------"
-        echo -e "${AZUL}1)${NORMAL} Crear ${VERDE}NUEVO USUARIO${NORMAL} (UUID, Path y Link)"
-        echo -e "${AZUL}2)${NORMAL} Eliminar ${ROJO}USUARIO existente${NORMAL} (Por UUID)"
-        echo -e "${AZUL}3)${NORMAL} Limitar/Reiniciar GB (vía API)"
-        echo -e "${AZUL}4)${NORMAL} Mostrar Usuarios ${AMARILLO}Activos${NORMAL}"
-        echo -e "${AZUL}5)${NORMAL} ${BLANCO}Consultar Consumo de GB (API) ${VERDE}⭐${NORMAL}"
+        echo -e "${AZUL}1) ➕ Crear ${VERDE}NUEVO USUARIO${NORMAL}"
+        echo -e "${AZUL}2) ➖ Eliminar ${ROJO}USUARIO${NORMAL}"
+        echo -e "${AZUL}3) 📊 Limitar/Reiniciar GB"
+        echo -e "${AZUL}4) 📈 Consultar Consumo de GB ${VERDE}⭐${NORMAL}"
+        echo -e "${AZUL}5) 👤 Mostrar Usuarios Activos"
         echo -e "---------------------------------------------------"
-        echo -e "${AZUL}6)${NORMAL} ${BLANCO}Activar/Desactivar TLS${NORMAL}"
-        echo -e "${AZUL}7)${NORMAL} Cambiar PUERTO (${SERVER_PORT})"
-        echo -e "${AZUL}8)${NORMAL} Cambiar PROTOCOLO (${TRANSPORT_NETWORK})"
-        echo -e "${AZUL}9)${NORMAL} Cambiar DOMINIO/HOST (${SERVER_DOMAIN})"
+        echo -e "${AZUL}6) 🔒 Activar/Desactivar TLS"
+        echo -e "${AZUL}7) 🔢 Administrar Múltiples Puertos"
+        echo -e "${AZUL}8) 📡 Cambiar PROTOCOLO"
+        echo -e "${AZUL}9) 🌐 Cambiar DOMINIO/HOST"
         echo -e "---------------------------------------------------"
-        echo -e "${AZUL}0)${NORMAL} Salir del script"
+        echo -e "${AZUL}0) 🚪 Salir del script"
         echo -e "---------------------------------------------------"
         
         read -p "Opción: " choice
@@ -565,13 +691,13 @@ function main_menu() {
             1) create_user ;;
             2) delete_user ;;
             3) manage_traffic_limit ;;
-            4) banner; echo -e "${AMARILLO}--- USUARIOS ACTIVOS (UUID | Email) ---${NORMAL}"; ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null; pause ;;
-            5) show_traffic_stats ;;
+            4) show_traffic_stats ;;
+            5) banner; echo -e "${AMARILLO}--- 👤 USUARIOS ACTIVOS (UUID | Email) ---${NORMAL}"; ${JQ_PATH} '.inbounds[0].settings.clients[] | "\(.id) | \(.email)"' "${CONFIG_FILE}" 2>/dev/null; pause ;;
             6) change_tls_status ;;
-            7) change_port ;;
+            7) manage_multi_ports ;;
             8) change_protocol ;;
             9) change_domain ;;
-            0) echo -e "${AZUL}¡Adiós!${NORMAL}"; exit 0 ;;
+            0) echo -e "${AZUL}¡Adiós! 👋${NORMAL}"; systemctl status xray; exit 0 ;;
             *) echo -e "${ROJO}Opción no válida. Intenta de nuevo.${NORMAL}"; pause ;;
         esac
     done
