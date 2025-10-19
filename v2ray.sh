@@ -2,7 +2,7 @@
 
 # =======================================================
 # SCRIPT UNIFICADO DE GESTIÓN XRAY/V2RAY (VERSIÓN DEFINITIVA)
-# Incluye Multi-Puerto, Monitoreo de GB y Emojis en el Menú.
+# Incluye Multi-Puerto CORREGIDO, Monitoreo de GB y Emojis.
 # =======================================================
 
 INSTALL_DIR="/usr/local/etc/xray"
@@ -59,6 +59,7 @@ function install_dependencies() {
     if [ "$PKG_MANAGER" != "none" ]; then
         echo "Usando $PKG_MANAGER..."
         sudo $PKG_MANAGER update -y
+        # 'bc' es necesario para los cálculos de GB
         sudo $PKG_MANAGER install -y wget curl unzip jq bc
     else
         echo -e "${ROJO}[ERROR]${NORMAL} Gestor de paquetes no soportado."
@@ -226,7 +227,7 @@ EOF_TCP
       }
     },
     "system": { "statsInboundUplink": true, "statsInboundDownlink": true }
-  }
+    }
 }
 EOF_CONFIG
 )
@@ -243,7 +244,7 @@ EOF_CONFIG
 }
 
 function change_port() {
-    # Función original de cambio de puerto (redirige a la nueva función de gestión de puertos)
+    # Redirige a la función de gestión de multi-puerto
     manage_multi_ports
 }
 
@@ -337,7 +338,7 @@ function change_domain() {
     pause
 }
 
-# --- Gestión de Múltiples Puertos ---
+# ⭐️ FUNCIÓN CORREGIDA: Gestión de Múltiples Puertos
 function manage_multi_ports() {
     banner
     echo -e "${AMARILLO}--- 7. ADMINISTRAR PUERTOS VMESS ---${NORMAL}"
@@ -355,8 +356,8 @@ function manage_multi_ports() {
 
     echo -e "Puertos actualmente activos: ${VERDE}${port_array[*]}${NORMAL}"
     echo "-------------------------------------------------"
-    echo "1) ${VERDE}Agregar Nuevo Puerto${NORMAL}"
-    echo "2) ${ROJO}Eliminar Puerto Existente${NORMAL}"
+    echo "1) ${VERDE}Agregar Nuevo Puerto ➕${NORMAL}"
+    echo "2) ${ROJO}Eliminar Puerto Existente ➖${NORMAL}"
     read -p "Opción (1 o 2): " PORT_CHOICE
     
     if [ "$PORT_CHOICE" == "1" ]; then
@@ -399,27 +400,36 @@ function manage_multi_ports() {
         return
     fi
     
-    # Aplicar los cambios al config.json
+    # ⭐️ CORRECCIÓN APLICADA: Construir el JSON de puertos de forma robusta
     local PORT_JSON=""
     if [ ${#port_array[@]} -eq 1 ]; then
         PORT_JSON="${port_array[0]}" # Si solo queda 1, se guarda como número
     else
-        # Convertir el array a formato JSON [p1, p2, p3]
-        PORT_JSON=$(${JQ_PATH} -n --argjson arr "$(printf '%s\n' "${port_array[@]}" | ${JQ_PATH} -R . | ${JQ_PATH} -slR .)" '[$arr | .[] | tonumber]')
+        # Construir la cadena JSON como "[p1, p2, p3, ...]"
+        local json_ports=""
+        for p in "${port_array[@]}"; do
+            if [ -n "$json_ports" ]; then
+                json_ports="${json_ports}, "
+            fi
+            json_ports="${json_ports}${p}"
+        done
+        PORT_JSON="[${json_ports}]"
     fi
     
-    # Usar jq para actualizar solo la clave 'port'
-    ${JQ_PATH} '.inbounds[0].port = '"$PORT_JSON" "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
+    # Usar jq para actualizar solo la clave 'port' con la nueva variable PORT_JSON
+    # Usamos --argjson para que jq interprete PORT_JSON como un número o array
+    ${JQ_PATH} --argjson new_port "$PORT_JSON" '.inbounds[0].port = $new_port' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
     if [ $? -eq 0 ]; then
         echo -e "${VERDE}[ÉXITO]${NORMAL} Configuración de puertos actualizada."
         systemctl restart xray
         load_global_config # Recargar el banner
     else
-        echo -e "${ROJO}[ERROR]${NORMAL} Falló al guardar la configuración de puertos."
+        echo -e "${ROJO}[ERROR]${NORMAL} Falló al guardar la configuración de puertos. Revise el archivo ${CONFIG_FILE}."
     fi
     pause
 }
+
 
 # --- Funciones de Administración ---
 
@@ -437,7 +447,7 @@ function create_user() {
     local traffic_tag="user-${new_uuid}" # Tag completo para rastreo de tráfico
     local random_path="/" # Por defecto
     
-    # 🛑 NUEVO: Pedir el puerto de la lista
+    # Pedir el puerto de la lista de puertos activos
     local current_ports=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
     local available_ports=()
     if echo "$current_ports" | grep -v -q '\['; then
@@ -461,7 +471,7 @@ function create_user() {
         echo -e "${AZUL}[INFO]${NORMAL} Path generado para este usuario: ${random_path}"
     fi
 
-    # Lógica de jq para agregar cliente al primer inbound, incluyendo la etiqueta de tráfico (flow)
+    # Lógica de jq para agregar cliente al primer inbound
     ${JQ_PATH} '.inbounds[0].settings.clients += [{"id": "'"${new_uuid}"'", "alterId": 0, "email": "'"${username}"'", "level": 0, "flow": "'"${traffic_tag}"'"}]' "${CONFIG_FILE}" > temp.json && mv temp.json "${CONFIG_FILE}"
     
     if [ $? -eq 0 ]; then
@@ -511,7 +521,7 @@ EOF
     echo -e "${BLANCO}Host: ${SERVER_DOMAIN} | Puerto: ${user_port}${NORMAL}"
     echo -e "Transporte: ${TRANSPORT_NETWORK} | Seguridad: ${SECURITY_TYPE} | Path: ${user_path}"
     
-    # 3. ⭐️ LA REPARACIÓN: Imprimir la URL completa con el prefijo vmess://
+    # 3. La reparación: Imprimir la URL completa con el prefijo vmess://
     echo -e "\n${VERDE}vmess://${vmess_link}${NORMAL}\n"
     
     echo -e "Pégalo en tu aplicación cliente compatible."
@@ -569,8 +579,9 @@ function manage_traffic_limit() {
 
     case $LIMIT_CHOICE in
         1)
-            # Esta función no existe, pero redirigirá a la consulta manual
+            echo "Uplink:"
             /usr/local/bin/xray api stats --server ${XRAY_API_SERVER} -r "user>>>${target_uuid}>>>traffic>>>uplink"
+            echo "Downlink:"
             /usr/local/bin/xray api stats --server ${XRAY_API_SERVER} -r "user>>>${target_uuid}>>>traffic>>>downlink"
             ;;
         2)
