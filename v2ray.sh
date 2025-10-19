@@ -338,21 +338,25 @@ function change_domain() {
     pause
 }
 
-# --- FUNCIÓN: Gestión de Múltiples Puertos (Corregida) ---
+# --- FUNCIÓN: Gestión de Múltiples Puertos (REPARACIÓN FINAL) ---
 function manage_multi_ports() {
     banner
     echo -e "${AMARILLO}--- 7. ADMINISTRAR PUERTOS VMESS ---${NORMAL}"
     
-    local current_ports=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    # Intenta obtener la lista de puertos y aplanarla si es compleja
+    local ports_json=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
     local port_array=()
 
-    # Si es un solo número, convertir a array temporalmente
-    if echo "$current_ports" | grep -v -q '\['; then
-        port_array+=("$current_ports")
-    else
-        # Si ya es un array, parsearlo
-        port_array=($(${JQ_PATH} -r '.inbounds[0].port[]' "${CONFIG_FILE}" 2>/dev/null))
-    fi
+    # Usar jq para aplanar y extraer todos los números de puerto en una sola línea
+    local ports_string=$(echo "$ports_json" | ${JQ_PATH} -r '
+        def flatten_ports: 
+            if type == "array" then 
+                .[][]? // .[] // . 
+            else . end;
+        flatten_ports | tostring' 2>/dev/null | tr '\n' ' ')
+        
+    read -r -a port_array <<< "$ports_string"
+    port_array=($(echo "${port_array[@]}" | tr ' ' '\n' | grep -vE '^\s*$' | sort -u)) # Limpiar y desduplicar
 
     echo -e "Puertos actualmente activos: ${VERDE}${port_array[*]}${NORMAL}"
     echo "-------------------------------------------------"
@@ -429,7 +433,6 @@ function manage_multi_ports() {
     pause
 }
 
-
 # --- Funciones de Administración ---
 
 function generate_random_path() {
@@ -437,7 +440,7 @@ function generate_random_path() {
     cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1
 }
 
-# ⭐️ FUNCIÓN: create_user (CORREGIDA para el listado de puertos)
+# --- FUNCIÓN: create_user (REPARACIÓN FINAL) ---
 function create_user() {
     banner
     echo -e "${AMARILLO}--- 1. CREAR NUEVO USUARIO VMESS ---${NORMAL}"
@@ -447,18 +450,19 @@ function create_user() {
     local traffic_tag="user-${new_uuid}" # Tag completo para rastreo de tráfico
     local random_path="/" # Por defecto
     
-    # ⭐️ INICIO DE LA CORRECCIÓN: Obtener y limpiar la lista de puertos activos
-    local current_ports_raw=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
+    # ⭐️ INICIO DE LA REPARACIÓN: Obtener y limpiar la lista de puertos activos
+    local ports_json=$(${JQ_PATH} '.inbounds[0].port' "${CONFIG_FILE}" 2>/dev/null)
     local available_ports=()
 
-    if echo "$current_ports_raw" | grep -q '\['; then
-        # Es un array: extrae los números y convierte a array Bash (limpiando comillas/newlines)
-        local ports_string=$(echo "$current_ports_raw" | ${JQ_PATH} -r '.[] | tostring' 2>/dev/null | tr '\n' ' ')
-        read -r -a available_ports <<< "$ports_string"
-    else
-        # Es un puerto simple:
-        available_ports+=("$current_ports_raw")
-    fi
+    # Usar jq para aplanar y extraer todos los números de puerto en una sola línea
+    local ports_string=$(echo "$ports_json" | ${JQ_PATH} -r '
+        def flatten_ports: 
+            if type == "array" then 
+                .[][]? // .[] // . 
+            else . end;
+        flatten_ports | tostring' 2>/dev/null | tr '\n' ' ')
+        
+    read -r -a available_ports <<< "$ports_string"
     # Limpiar y ordenar la lista para la validación
     available_ports=($(echo "${available_ports[@]}" | tr ' ' '\n' | grep -vE '^\s*$' | sort -u))
 
@@ -471,7 +475,7 @@ function create_user() {
     echo -e "\n${AZUL}Puertos disponibles:${NORMAL} ${available_ports[*]}"
     read -p "Seleccione el puerto que el usuario usará: " USER_PORT
     
-    # ⭐️ FIN DE LA CORRECCIÓN
+    # ⭐️ FIN DE LA REPARACIÓN
     
     # La comprobación ahora funciona porque 'available_ports' es un array de Bash limpio
     if [[ ! " ${available_ports[*]} " =~ " ${USER_PORT} " ]]; then
